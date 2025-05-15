@@ -1,177 +1,202 @@
 "use client";
-import React, { useRef, useState, useEffect } from "react";
 
-const AudioRecorder = () => {
-  const MAX_DURATION = 20; // 20 seconds
+import React, { useState, useRef, useEffect } from 'react';
+// import Loader from './Waves';
+import { FiMic } from 'react-icons/fi';
+import { MdMic, MdMicOff } from 'react-icons/md';
 
-  const audioContextRef = useRef(null);
-  const mediaStreamRef = useRef(null);
-  const mediaStreamSourceRef = useRef(null);
-  const processorRef = useRef(null);
-  const audioDataRef = useRef([]);
+function AudioRecorder() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [audioURL, setAudioURL] = useState('');
+  const [recordedBlob, setRecordedBlob] = useState(null);
+  const [seconds, setSeconds] = useState(0);
 
-  const [recording, setRecording] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [audioURL, setAudioURL] = useState(null);
-  const [timeLeft, setTimeLeft] = useState(MAX_DURATION);
-  const [timerId, setTimerId] = useState(null);
+  const mediaRecorderRef = useRef(null);
+  const streamRef = useRef(null);
+  const chunksRef = useRef([]);
+  const timerIntervalRef = useRef(null);
+
+  const MAX_RECORDING_TIME = 20; // seconds
 
   const initAudioContext = async () => {
+};
+
+  const startRecording = async () => {
+    await initAudioContext()
+    const isSupported = !!(navigator.mediaDevices?.getUserMedia);
+
+    if (!isSupported) {
+      alert("Audio recording is not supported in your browser or context (HTTPS required).");
+      return;
+    }
+    
+  
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      mediaStreamSourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
-
-      processorRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-      audioDataRef.current = [];
-
-      processorRef.current.onaudioprocess = (e) => {
-        if (!paused) {
-          const channelData = e.inputBuffer.getChannelData(0);
-          audioDataRef.current.push(new Float32Array(channelData));
+      streamRef.current = stream;
+  
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : '';
+  
+      const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = mediaRecorder;
+  
+      mediaRecorder.start();
+      setIsRecording(true);
+      setIsPaused(false);
+      setSeconds(0);
+      chunksRef.current = [];
+  
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunksRef.current.push(e.data);
         }
       };
+  
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType || 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        setAudioURL(url);
+        setRecordedBlob(blob);
+      };
+  
+      timerIntervalRef.current = setInterval(() => {
+        setSeconds((prev) => {
+          if (prev + 1 >= MAX_RECORDING_TIME) {
+            stopRecording();
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } catch (error) {
+      console.error('Error accessing microphone:', error);
+      alert('Microphone access was denied or not supported. Please check your browser settings.');
+    }
+  };
+  
 
-      mediaStreamSourceRef.current.connect(processorRef.current);
-      processorRef.current.connect(audioContextRef.current.destination);
-    } catch (err) {
-      console.error("Microphone access error:", err);
-      alert("Microphone access is required.");
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.pause();
+      setIsPaused(true);
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     }
   };
 
-  const startRecording = async () => {
-    await initAudioContext();
-    setRecording(true);
-    setPaused(false);
-    setTimeLeft(MAX_DURATION);
-
-    const id = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          stopRecording();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    setTimerId(id);
-  };
-
-  const pauseRecording = () => {
-    setPaused((prev) => !prev);
+  const resumeRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "paused") {
+      mediaRecorderRef.current.resume();
+      setIsPaused(false);
+      timerIntervalRef.current = setInterval(() => {
+        setSeconds(prev => {
+          if (prev + 1 >= MAX_RECORDING_TIME) {
+            stopRecording();
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    }
   };
 
   const stopRecording = () => {
-  clearInterval(timerId);
-
-  if (processorRef.current) processorRef.current.disconnect();
-  if (mediaStreamSourceRef.current) mediaStreamSourceRef.current.disconnect();
-
-  const merged = mergeBuffers(audioDataRef.current);
-  const sampleRate = audioContextRef.current?.sampleRate || 44100; // fallback just in case
-  const wavBlob = encodeWAV(merged, sampleRate);
-  const url = URL.createObjectURL(wavBlob);
-
-  setAudioURL(url);
-  setRecording(false);
-  setPaused(false);
-  setTimeLeft(MAX_DURATION);
-
-  cleanup();
-
-  console.log("WAV Blob ready for S3 upload:", wavBlob);
-};
-
-
-  const reRecord = () => {
-    setAudioURL(null);
-    setRecording(false);
-    setPaused(false);
-    setTimeLeft(MAX_DURATION);
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    if (mediaRecorderRef.current && (mediaRecorderRef.current.state === "recording" || mediaRecorderRef.current.state === "paused")) {
+      mediaRecorderRef.current.stop();
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+    }
+    setIsRecording(false);
+    setIsPaused(false);
   };
 
-  const cleanup = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
+  const resetRecording = () => {
+    setAudioURL('');
+    setRecordedBlob(null);
+    setSeconds(0);
   };
 
-  const mergeBuffers = (buffers) => {
-    const length = buffers.reduce((acc, b) => acc + b.length, 0);
-    const result = new Float32Array(length);
-    let offset = 0;
-    for (const buffer of buffers) {
-      result.set(buffer, offset);
-      offset += buffer.length;
-    }
-    return result;
-  };
-
-  const encodeWAV = (samples, sampleRate) => {
-    const buffer = new ArrayBuffer(44 + samples.length * 2);
-    const view = new DataView(buffer);
-
-    function writeString(view, offset, string) {
-      for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-      }
-    }
-
-    writeString(view, 0, "RIFF");
-    view.setUint32(4, 36 + samples.length * 2, true);
-    writeString(view, 8, "WAVE");
-    writeString(view, 12, "fmt ");
-    view.setUint32(16, 16, true); // Subchunk1Size (PCM)
-    view.setUint16(20, 1, true); // AudioFormat (PCM)
-    view.setUint16(22, 1, true); // NumChannels
-    view.setUint32(24, sampleRate, true); // SampleRate
-    view.setUint32(28, sampleRate * 2, true); // ByteRate
-    view.setUint16(32, 2, true); // BlockAlign
-    view.setUint16(34, 16, true); // BitsPerSample
-    writeString(view, 36, "data");
-    view.setUint32(40, samples.length * 2, true); // Subchunk2Size
-
-    let offset = 44;
-    for (let i = 0; i < samples.length; i++, offset += 2) {
-      const s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    }
-
-    return new Blob([view], { type: "audio/wav" });
-  };
+  useEffect(() => {
+    return () => {
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
+    };
+  }, []);
 
   return (
-    <div style={{ padding: "20px", fontFamily: "sans-serif" }}>
-      {!recording && !audioURL && (
-        <button onClick={startRecording}>Start Recording</button>
+    <div className="p-4">
+      <h1 className="text-2xl font-bold mb-4">Audio Recorder (Max 20 seconds)</h1>
+
+      {!isRecording && !audioURL && (
+        <button onClick={startRecording} className="bg-green-500 text-white px-4 py-2 rounded">
+          Start Recording
+        </button>
+      )}
+     
+      <div className='flex gap-4 bg-red-300 '>
+  {isRecording && !isPaused && (
+    <div className='bg-red-300 p-4 rounded-full'>
+      <FiMic className="w-10 h-10 text-white" />
+    </div>
+  )}
+  {isPaused && (
+    <div className='bg-black p-4 h-[100px] w-[100px] flex items-center justify-center'>
+      <MdMicOff className="w-10 h-10 text-white" />
+    </div>
+  )}
+</div>
+
+      {isRecording && (
+        <div className="flex flex-col items-center gap-4">
+          
+          <div className="text-3xl font-bold">{seconds}s</div>
+
+          <div className="flex gap-4">
+            {!isPaused ? (
+              <button onClick={pauseRecording} className="bg-yellow-500 text-white px-4 py-2 rounded">
+                Pause
+              </button>
+            ) : (
+              <button onClick={resumeRecording} className="bg-blue-500 text-white px-4 py-2 rounded">
+                Resume
+              </button>
+            )}
+            <button onClick={stopRecording} className="bg-red-500 text-white px-4 py-2 rounded">
+              Stop
+            </button>
+          </div>
+        </div>
       )}
 
-      {recording && (
-        <>
-          <p>Recording... {timeLeft}s left</p>
-          <button onClick={pauseRecording}>{paused ? "Resume" : "Pause"}</button>
-          <button onClick={stopRecording}>Stop</button>
-        </>
-      )}
-
-      {audioURL && (
-        <div>
-          <p>Recorded Audio:</p>
-          <audio controls src={audioURL}></audio>
-          <br />
-          <button onClick={reRecord}>Re-record</button>
+      {audioURL && !isRecording && (
+        <div className="mt-6">
+          <audio controls src={audioURL} className="w-full" />
+          <div className="flex gap-4 mt-4">
+            <button
+              onClick={() => {
+                resetRecording();
+                startRecording();
+              }}
+              className="bg-green-500 text-white px-4 py-2 rounded"
+            >
+              Record Again
+            </button>
+            <a
+              href={audioURL}
+              download="recording.webm"
+              className="bg-blue-500 text-white px-4 py-2 rounded"
+            >
+              Download
+            </a>
+          </div>
         </div>
       )}
     </div>
   );
-};
+}
 
 export default AudioRecorder;
